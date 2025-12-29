@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Spotify Callback</title>
+</head>
+<body>
+  <h1>Spotify Callback</h1>
+  <pre id="out">Working…</pre>
+  <p><button id="save" disabled>Send refresh token to Shortcuts</button></p>
+
+<script>
+const clientId = "PASTE_YOUR_CLIENT_ID_HERE";
+const redirectUri = "https://YOURNAME.github.io/spotify-shortcuts/callback.html";
+
+const params = new URLSearchParams(window.location.search);
+const code = params.get("code");
+const verifier = sessionStorage.getItem("pkce_verifier");
+
+const out = document.getElementById("out");
+const saveBtn = document.getElementById("save");
+
+async function tokenExchange() {
+  if (!code || !verifier) {
+    out.textContent = "Missing code or verifier. Go back and start from index.html";
+    return;
+  }
+
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id: clientId,
+    code,
+    redirect_uri: redirectUri,
+    code_verifier: verifier
+  });
+
+  const r = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body
+  });
+
+  const data = await r.json();
+  out.textContent = JSON.stringify(data, null, 2);
+
+  if (data.refresh_token) {
+    const refresh = data.refresh_token;
+    // Uses Apple's documented URL scheme to run a Shortcut with text input:
+    const shortcutUrl =
+      "shortcuts://run-shortcut?name=" + encodeURIComponent("Spotify Token Save") +
+      "&input=text&text=" + encodeURIComponent(refresh);
+
+    saveBtn.disabled = false;
+    saveBtn.onclick = () => window.location.href = shortcutUrl;
+  }
+}
+
+tokenExchange();
+</script>
+</body>
+</html>
