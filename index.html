@@ -1,54 +1,163 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Spotify PKCE Login</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Spotify Callback</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; }
+    pre { background: #0b1020; color: #d6e0ff; padding: 14px; border-radius: 10px; overflow:auto; }
+    button { padding: 10px 14px; font-size: 16px; cursor: pointer; margin-right: 10px; }
+    .row { margin-top: 12px; }
+    code { background: #f3f3f3; padding: 2px 6px; border-radius: 6px; }
+  </style>
 </head>
 <body>
-  <h1>Spotify → Shortcuts (PKCE)</h1>
-  <p>Click to authorize and generate a refresh token.</p>
-  <button id="go">Login with Spotify</button>
+  <h1>Spotify Callback</h1>
+
+  <p>Redirect URI (must match allowlist exactly):<br/>
+    <code id="ru"></code>
+  </p>
+
+  <pre id="out">Working…</pre>
+
+  <div class="row">
+    <button id="copy" disabled>Copy refresh token</button>
+    <button id="save" disabled>Send refresh token to Shortcuts</button>
+  </div>
 
 <script>
 const clientId = "70e069452e444c5db2745c1d99c4c7ef";
-const redirectUri = "https://MagicManBen.github.io/spotify-shortcuts/callback.html";
-const scope = "user-modify-playback-state user-read-playback-state";
 
-function base64url(bytes) {
-  return btoa(String.fromCharCode(...new Uint8Array(bytes)))
-    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+// IMPORTANT: match your allowlisted Redirect URI EXACTLY (case-sensitive).
+const redirectUri = "https://magicmanben.github.io/spotify-shortcuts/callback.html";
+
+document.getElementById("ru").textContent = redirectUri;
+
+const params = new URLSearchParams(window.location.search);
+const code = params.get("code");
+const error = params.get("error");
+const returnedState = params.get("state");
+
+const expectedState = localStorage.getItem("spotify_oauth_state");
+const verifier = localStorage.getItem("pkce_verifier");
+
+const out = document.getElementById("out");
+const saveBtn = document.getElementById("save");
+const copyBtn = document.getElementById("copy");
+
+function pretty(obj) {
+  return JSON.stringify(obj, null, 2);
 }
 
-async function sha256(plain) {
-  const enc = new TextEncoder().encode(plain);
-  return crypto.subtle.digest("SHA-256", enc);
-}
+async function tokenExchange() {
+  if (error) {
+    out.textContent = "Spotify returned an error:\n" + error;
+    return;
+  }
 
-function randomString(length = 64) {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
-  const rnd = new Uint8Array(length);
-  crypto.getRandomValues(rnd);
-  return Array.from(rnd, x => chars[x % chars.length]).join("");
-}
+  if (!code) {
+    out.textContent = "Missing ?code= in callback URL.\nGo back and start from index.html";
+    return;
+  }
 
-document.getElementById("go").addEventListener("click", async () => {
-  const verifier = randomString(96);
-  sessionStorage.setItem("pkce_verifier", verifier);
+  if (!verifier) {
+    out.textContent = "Missing PKCE verifier.\nThis usually happens if the callback opened in a different tab/browser context.\nGo back and try again.";
+    return;
+  }
 
-  const challenge = base64url(await sha256(verifier));
+  if (!expectedState || returnedState !== expectedState) {
+    out.textContent = "State mismatch (security check failed).\nTry again from index.html.";
+    return;
+  }
 
-  const auth = new URL("https://accounts.spotify.com/authorize");
-  auth.search = new URLSearchParams({
-    response_type: "code",
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
     client_id: clientId,
+    code,
     redirect_uri: redirectUri,
-    scope,
-    code_challenge_method: "S256",
-    code_challenge: challenge
-  }).toString();
+    code_verifier: verifier
+  });
 
-  window.location.href = auth.toString();
-});
+  let r;
+  let data;
+  try {
+    r = await fetch("https://accounts.spotify.com/api/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body
+    });
+
+    // Spotify often returns JSON even on errors.
+    data = await r.json().catch(() => ({}));
+  } catch (e) {
+    out.textContent = "Network error calling /api/token:\n" + (e?.message || String(e));
+    return;
+  }
+
+  out.textContent = pretty({
+    http_status: r.status,
+    ok: r.ok,
+    response: data
+  });
+
+  if (!r.ok) {
+    // Common causes: redirect_uri mismatch (including case), wrong redirect allowlist, bad code_verifier, etc.
+    return;
+  }
+
+  // Note: Spotify may omit refresh_token if it was already issued before.
+  const refresh = data.refresh_token;
+
+  if (refresh) {
+    // Keep it around so you can still access it if you refresh the page.
+    localStorage.setItem("spotify_refresh_token", refresh);
+
+    copyBtn.disabled = false;
+    copyBtn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(refresh);
+        copyBtn.textContent = "Copied ✅";
+        setTimeout(() => (copyBtn.textContent = "Copy refresh token"), 1200);
+      } catch {
+        // Fallback: show it plainly
+        out.textContent += "\n\n(Clipboard blocked — refresh token below)\n" + refresh;
+      }
+    };
+
+    // Send to Shortcuts
+    const shortcutUrl =
+      "shortcuts://run-shortcut?name=" + encodeURIComponent("Spotify Token Save") +
+      "&input=text&text=" + encodeURIComponent(refresh);
+
+    saveBtn.disabled = false;
+    saveBtn.onclick = () => window.location.href = shortcutUrl;
+  } else {
+    const existing = localStorage.getItem("spotify_refresh_token");
+    if (existing) {
+      out.textContent += "\n\nNo new refresh_token returned. You already have one saved locally:\n" + existing;
+      copyBtn.disabled = false;
+      copyBtn.onclick = async () => {
+        await navigator.clipboard.writeText(existing);
+        copyBtn.textContent = "Copied ✅";
+        setTimeout(() => (copyBtn.textContent = "Copy refresh token"), 1200);
+      };
+      const shortcutUrl =
+        "shortcuts://run-shortcut?name=" + encodeURIComponent("Spotify Token Save") +
+        "&input=text&text=" + encodeURIComponent(existing);
+      saveBtn.disabled = false;
+      saveBtn.onclick = () => window.location.href = shortcutUrl;
+    } else {
+      out.textContent += "\n\nNo refresh_token returned. This can happen if Spotify thinks you already granted access previously.\nIf you truly need a new one, revoke the app access in your Spotify account and re-authorize.";
+    }
+  }
+
+  // Optional cleanup (keeps refresh token if stored above)
+  localStorage.removeItem("pkce_verifier");
+  localStorage.removeItem("spotify_oauth_state");
+}
+
+tokenExchange();
 </script>
 </body>
 </html>
